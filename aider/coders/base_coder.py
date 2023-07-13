@@ -6,7 +6,7 @@ import os
 import sys
 import traceback
 from json.decoder import JSONDecodeError
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import backoff
 import git
@@ -53,8 +53,6 @@ class Coder:
         main_model,
         edit_format,
         io,
-        openai_api_key,
-        openai_api_base="https://api.openai.com/v1",
         **kwargs,
     ):
         from . import (
@@ -64,9 +62,6 @@ class Coder:
             WholeFileCoder,
             WholeFileFunctionCoder,
         )
-
-        openai.api_key = openai_api_key
-        openai.api_base = openai_api_base
 
         if not main_model:
             main_model = models.GPT35_16k
@@ -111,6 +106,7 @@ class Coder:
         map_tokens=1024,
         verbose=False,
         assistant_output_color="blue",
+        code_theme="default",
         stream=True,
         use_git=True,
     ):
@@ -135,6 +131,7 @@ class Coder:
         self.auto_commits = auto_commits
         self.dirty_commits = dirty_commits
         self.assistant_output_color = assistant_output_color
+        self.code_theme = code_theme
 
         self.dry_run = dry_run
         self.pretty = pretty
@@ -142,7 +139,7 @@ class Coder:
         if pretty:
             self.console = Console()
         else:
-            self.console = Console(force_terminal=True, no_color=True)
+            self.console = Console(force_terminal=False, no_color=True)
 
         self.main_model = main_model
 
@@ -155,30 +152,31 @@ class Coder:
         if use_git:
             self.set_repo(fnames)
         else:
-            self.abs_fnames = [str(Path(fname).resolve()) for fname in fnames]
+            self.abs_fnames = set([str(Path(fname).resolve()) for fname in fnames])
 
         if self.repo:
-            rel_repo_dir = os.path.relpath(self.repo.git_dir, os.getcwd())
+            rel_repo_dir = self.get_rel_repo_dir()
             self.io.tool_output(f"Git repo: {rel_repo_dir}")
         else:
             self.io.tool_output("Git repo: none")
             self.find_common_root()
 
         if main_model.use_repo_map and self.repo and self.gpt_prompts.repo_content_prefix:
-            rm_io = io if self.verbose else None
             self.repo_map = RepoMap(
                 map_tokens,
                 self.root,
                 self.main_model,
-                rm_io,
+                io,
                 self.gpt_prompts.repo_content_prefix,
+                self.verbose,
             )
 
             if self.repo_map.use_ctags:
                 self.io.tool_output(f"Repo-map: universal-ctags using {map_tokens} tokens")
             elif not self.repo_map.has_ctags and map_tokens > 0:
                 self.io.tool_output(
-                    f"Repo-map: basic using {map_tokens} tokens (universal-ctags not found)"
+                    f"Repo-map: basic using {map_tokens} tokens"
+                    f" ({self.repo_map.ctags_disabled_reason})"
                 )
             else:
                 self.io.tool_output("Repo-map: disabled because map_tokens == 0")
@@ -205,6 +203,21 @@ class Coder:
         else:
             self.root = os.getcwd()
 
+        self.root = utils.safe_abs_path(self.root)
+
+    def get_rel_repo_dir(self):
+        try:
+            return os.path.relpath(self.repo.git_dir, os.getcwd())
+        except ValueError:
+            return self.repo.git_dir
+
+    def add_rel_fname(self, rel_fname):
+        self.abs_fnames.add(self.abs_root_path(rel_fname))
+
+    def abs_root_path(self, path):
+        res = Path(self.root) / path
+        return utils.safe_abs_path(res)
+
     def set_repo(self, cmd_line_fnames):
         if not cmd_line_fnames:
             cmd_line_fnames = ["."]
@@ -217,8 +230,11 @@ class Coder:
                 fname.parent.mkdir(parents=True, exist_ok=True)
                 fname.touch()
 
+            fname = fname.resolve()
+
             try:
                 repo_path = git.Repo(fname, search_parent_directories=True).working_dir
+                repo_path = utils.safe_abs_path(repo_path)
                 repo_paths.append(repo_path)
             except git.exc.InvalidGitRepositoryError:
                 pass
@@ -226,7 +242,6 @@ class Coder:
             if fname.is_dir():
                 continue
 
-            fname = fname.resolve()
             self.abs_fnames.add(str(fname))
 
         num_repos = len(set(repo_paths))
@@ -238,37 +253,36 @@ class Coder:
             return
 
         # https://github.com/gitpython-developers/GitPython/issues/427
-        repo = git.Repo(repo_paths.pop(), odbt=git.GitDB)
+        self.repo = git.Repo(repo_paths.pop(), odbt=git.GitDB)
 
-        self.root = repo.working_tree_dir
+        self.root = utils.safe_abs_path(self.repo.working_tree_dir)
 
         new_files = []
         for fname in self.abs_fnames:
             relative_fname = self.get_rel_fname(fname)
-            tracked_files = set(repo.git.ls_files().splitlines())
+
+            tracked_files = set(self.get_tracked_files())
             if relative_fname not in tracked_files:
                 new_files.append(relative_fname)
 
         if new_files:
-            rel_repo_dir = os.path.relpath(repo.git_dir, os.getcwd())
+            rel_repo_dir = self.get_rel_repo_dir()
 
             self.io.tool_output(f"Files not tracked in {rel_repo_dir}:")
             for fn in new_files:
                 self.io.tool_output(f" - {fn}")
             if self.io.confirm_ask("Add them?"):
                 for relative_fname in new_files:
-                    repo.git.add(relative_fname)
+                    self.repo.git.add(relative_fname)
                     self.io.tool_output(f"Added {relative_fname} to the git repo")
                 show_files = ", ".join(new_files)
                 commit_message = f"Added new files to the git repo: {show_files}"
-                repo.git.commit("-m", commit_message, "--no-verify")
-                commit_hash = repo.head.commit.hexsha[:7]
+                self.repo.git.commit("-m", commit_message, "--no-verify")
+                commit_hash = self.repo.head.commit.hexsha[:7]
                 self.io.tool_output(f"Commit {commit_hash} {commit_message}")
             else:
                 self.io.tool_error("Skipped adding new files to the git repo.")
                 return
-
-        self.repo = repo
 
     # fences are obfuscated so aider can modify this file!
     fences = [
@@ -281,12 +295,21 @@ class Coder:
     ]
     fence = fences[0]
 
+    def get_abs_fnames_content(self):
+        for fname in list(self.abs_fnames):
+            content = self.io.read_text(fname)
+
+            if content is None:
+                relative_fname = self.get_rel_fname(fname)
+                self.io.tool_error(f"Dropping {relative_fname} from the chat.")
+                self.abs_fnames.remove(fname)
+            else:
+                yield fname, content
+
     def choose_fence(self):
         all_content = ""
-        for fname in self.abs_fnames:
-            all_content += Path(fname).read_text() + "\n"
-
-        all_content = all_content.splitlines()
+        for _fname, content in self.get_abs_fnames_content():
+            all_content += content + "\n"
 
         good = False
         for fence_open, fence_close in self.fences:
@@ -311,9 +334,14 @@ class Coder:
             fnames = self.abs_fnames
 
         prompt = ""
-        for fname in fnames:
+        for fname, content in self.get_abs_fnames_content():
             relative_fname = self.get_rel_fname(fname)
-            prompt += utils.quoted_file(fname, relative_fname, fence=self.fence)
+            prompt += "\n"
+            prompt += relative_fname
+            prompt += f"\n{self.fence[0]}\n"
+            prompt += content
+            prompt += f"{self.fence[1]}\n"
+
         return prompt
 
     def get_files_messages(self):
@@ -369,9 +397,13 @@ class Coder:
                 return
 
     def should_dirty_commit(self, inp):
-        is_commit_command = inp and inp.startswith("/commit")
-        if is_commit_command:
-            return
+        cmds = self.commands.matching_commands(inp)
+        if cmds:
+            matching_commands, _, _ = cmds
+            if len(matching_commands) == 1:
+                cmd = matching_commands[0]
+                if cmd in ("/exit", "/commit"):
+                    return
 
         if not self.dirty_commits:
             return
@@ -403,6 +435,7 @@ class Coder:
         self.num_control_c = 0
 
         if self.should_dirty_commit(inp):
+            self.io.tool_output("Git repo has uncommitted changes, preparing commit...")
             self.commit(ask=True, which="repo_files")
 
             # files changed, move cur messages back behind the files messages
@@ -443,7 +476,6 @@ class Coder:
         ]
 
         messages += self.done_messages
-
         messages += self.get_files_messages()
         messages += self.cur_messages
 
@@ -459,6 +491,8 @@ class Coder:
         except openai.error.InvalidRequestError as err:
             if "maximum context length" in str(err):
                 exhausted = True
+            else:
+                raise err
 
         if exhausted:
             self.num_exhausted_context_windows += 1
@@ -554,10 +588,6 @@ class Coder:
         for fname, rel_fnames in fname_to_rel_fnames.items():
             if len(rel_fnames) == 1 and fname in words:
                 mentioned_rel_fnames.add(rel_fnames[0])
-            else:
-                for rel_fname in rel_fnames:
-                    if rel_fname in words:
-                        mentioned_rel_fnames.add(rel_fname)
 
         if not mentioned_rel_fnames:
             return
@@ -569,7 +599,7 @@ class Coder:
             return
 
         for rel_fname in mentioned_rel_fnames:
-            self.abs_fnames.add(os.path.abspath(os.path.join(self.root, rel_fname)))
+            self.add_rel_fname(rel_fname)
 
         return prompts.added_files.format(fnames=", ".join(mentioned_rel_fnames))
 
@@ -582,7 +612,7 @@ class Coder:
             RateLimitError,
             requests.exceptions.ConnectionError,
         ),
-        max_tries=5,
+        max_tries=10,
         on_backoff=lambda details: print(f"Retry in {details['wait']} seconds."),
     )
     def send_with_retries(self, model, messages, functions):
@@ -594,6 +624,12 @@ class Coder:
         )
         if functions is not None:
             kwargs["functions"] = self.functions
+
+        # we are abusing the openai object to stash these values
+        if hasattr(openai, "api_deployment_id"):
+            kwargs["deployment_id"] = openai.api_deployment_id
+        if hasattr(openai, "api_engine"):
+            kwargs["engine"] = openai.api_engine
 
         # Generate SHA1 hash of kwargs and append it to chat_completion_call_hashes
         hash_object = hashlib.sha1(json.dumps(kwargs, sort_keys=True).encode())
@@ -670,7 +706,9 @@ class Coder:
 
         show_resp = self.render_incremental_response(True)
         if self.pretty:
-            show_resp = Markdown(show_resp, style=self.assistant_output_color, code_theme="default")
+            show_resp = Markdown(
+                show_resp, style=self.assistant_output_color, code_theme=self.code_theme
+            )
         else:
             show_resp = Text(show_resp or "<no response>")
 
@@ -726,7 +764,7 @@ class Coder:
         if not show_resp:
             return
 
-        md = Markdown(show_resp, style=self.assistant_output_color, code_theme="default")
+        md = Markdown(show_resp, style=self.assistant_output_color, code_theme=self.code_theme)
         live.update(md)
 
     def render_incremental_response(self, final):
@@ -735,9 +773,8 @@ class Coder:
     def get_context_from_history(self, history):
         context = ""
         if history:
-            context += "# Context:\n"
             for msg in history:
-                context += msg["role"].upper() + ": " + msg["content"] + "\n"
+                context += "\n" + msg["role"].upper() + ": " + msg["content"] + "\n"
         return context
 
     def get_commit_message(self, diffs, context):
@@ -865,7 +902,7 @@ class Coder:
 
         repo.git.add(*relative_dirty_fnames)
 
-        full_commit_message = commit_message + "\n\n" + context
+        full_commit_message = commit_message + "\n\n# Aider chat conversation:\n\n" + context
         repo.git.commit("-m", full_commit_message, "--no-verify")
         commit_hash = repo.head.commit.hexsha[:7]
         self.io.tool_output(f"Commit {commit_hash} {commit_message}")
@@ -881,7 +918,7 @@ class Coder:
 
     def get_all_relative_files(self):
         if self.repo:
-            files = self.repo.git.ls_files().splitlines()
+            files = self.get_tracked_files()
         else:
             files = self.get_inchat_relative_files()
 
@@ -889,7 +926,7 @@ class Coder:
 
     def get_all_abs_files(self):
         files = self.get_all_relative_files()
-        files = [os.path.abspath(os.path.join(self.root, path)) for path in files]
+        files = [self.abs_root_path(path) for path in files]
         return files
 
     def get_last_modified(self):
@@ -902,11 +939,11 @@ class Coder:
         return set(self.get_all_relative_files()) - set(self.get_inchat_relative_files())
 
     def allowed_to_edit(self, path, write_content=None):
-        full_path = os.path.abspath(os.path.join(self.root, path))
+        full_path = self.abs_root_path(path)
 
         if full_path in self.abs_fnames:
-            if not self.dry_run and write_content:
-                Path(full_path).write_text(write_content)
+            if write_content:
+                self.io.write_text(full_path, write_content)
             return full_path
 
         if not Path(full_path).exists():
@@ -925,16 +962,35 @@ class Coder:
 
         # Check if the file is already in the repo
         if self.repo:
-            tracked_files = set(self.repo.git.ls_files().splitlines())
+            tracked_files = set(self.get_tracked_files())
             relative_fname = self.get_rel_fname(full_path)
             if relative_fname not in tracked_files and self.io.confirm_ask(f"Add {path} to git?"):
                 if not self.dry_run:
                     self.repo.git.add(full_path)
 
-        if not self.dry_run and write_content:
-            Path(full_path).write_text(write_content)
+        if write_content:
+            self.io.write_text(full_path, write_content)
 
         return full_path
+
+    def get_tracked_files(self):
+        if not self.repo:
+            return []
+
+        try:
+            commit = self.repo.head.commit
+        except ValueError:
+            return set()
+
+        files = []
+        for blob in commit.tree.traverse():
+            if blob.type == "blob":  # blob is a file
+                files.append(blob.path)
+
+        # convert to appropriate os.sep, since git always normalizes to /
+        res = set(str(Path(PurePosixPath(path))) for path in files)
+
+        return res
 
     apply_update_errors = 0
 

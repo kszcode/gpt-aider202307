@@ -1,9 +1,9 @@
 import os
 import tempfile
 import unittest
-from subprocess import CompletedProcess
 from unittest.mock import patch
 
+from aider.io import InputOutput
 from aider.repomap import RepoMap
 
 
@@ -22,7 +22,8 @@ class TestRepoMap(unittest.TestCase):
                 with open(os.path.join(temp_dir, file), "w") as f:
                     f.write("")
 
-            repo_map = RepoMap(root=temp_dir)
+            io = InputOutput()
+            repo_map = RepoMap(root=temp_dir, io=io)
             other_files = [os.path.join(temp_dir, file) for file in test_files]
             result = repo_map.get_repo_map([], other_files)
 
@@ -66,7 +67,8 @@ print(my_function(3, 4))
             with open(os.path.join(temp_dir, test_file3), "w") as f:
                 f.write(file_content3)
 
-            repo_map = RepoMap(root=temp_dir)
+            io = InputOutput()
+            repo_map = RepoMap(root=temp_dir, io=io)
             other_files = [
                 os.path.join(temp_dir, test_file1),
                 os.path.join(temp_dir, test_file2),
@@ -84,23 +86,25 @@ print(my_function(3, 4))
     def test_check_for_ctags_failure(self):
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = Exception("ctags not found")
-            repo_map = RepoMap()
-            result = repo_map.check_for_ctags()
-            self.assertFalse(result)
+            repo_map = RepoMap(io=InputOutput())
+            self.assertFalse(repo_map.has_ctags)
 
     def test_check_for_ctags_success(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = CompletedProcess(
-                args=["ctags", "--version"],
-                returncode=0,
-                stdout=(
+        with patch("subprocess.check_output") as mock_run:
+            mock_run.side_effect = [
+                (
+                    b"Universal Ctags 0.0.0(f25b4bb7)\n  Optional compiled features: +wildcards,"
+                    b" +regex, +gnulib_fnmatch, +gnulib_regex, +iconv, +option-directory, +xpath,"
+                    b" +json, +interactive, +yaml, +case-insensitive-filenames, +packcc,"
+                    b" +optscript, +pcre2"
+                ),
+                (
                     b'{"_type": "tag", "name": "status", "path": "aider/main.py", "pattern": "/^   '
                     b' status = main()$/", "kind": "variable"}'
                 ),
-            )
-            repo_map = RepoMap()
-            result = repo_map.check_for_ctags()
-            self.assertTrue(result)
+            ]
+            repo_map = RepoMap(io=InputOutput())
+            self.assertTrue(repo_map.has_ctags)
 
     def test_get_repo_map_without_ctags(self):
         # Create a temporary directory with a sample Python file containing identifiers
@@ -119,7 +123,7 @@ print(my_function(3, 4))
                 with open(os.path.join(temp_dir, file), "w") as f:
                     f.write("")
 
-            repo_map = RepoMap(root=temp_dir)
+            repo_map = RepoMap(root=temp_dir, io=InputOutput())
             repo_map.has_ctags = False  # force it off
 
             other_files = [os.path.join(temp_dir, file) for file in test_files]
