@@ -1,9 +1,18 @@
 
 # Installing aider
 
+- [pip install aider-chat](#pip-install-aider-chat)
+- [Provide your OpenAI API key](#provide-your-openai-api-key)
+- [Install git](#install-git)
+
+Optional steps:
+
+- [Add aider to your editor (optional)](#add-aider-to-your-editor-optional)
+- [Install PortAudio (optional)](#install-portaudio-optional)
+
 ## pip install aider-chat
 
-Install the “aider-chat” package with pip from one of these sources:
+Install the “aider-chat” package with pip from one of these sources, using python 3.9-3.11:
 
 * PyPI hosts the released and most stable version:
   * `python -m pip install aider-chat`
@@ -50,40 +59,37 @@ See the [usage instructions](/#usage) to start coding with aider.
 
 The rest of the install steps are completely optional.
 
-## Install universal ctags (optional)
+---
 
-Aider does not require ctags, and will operate just fine without it.
+## Install PortAudio (optional)
 
-Installing ctags is helpful if you plan to use aider and GPT-4 with repositories
-that have more than a handful of files.
-This allows aider to build a
-[map of your entire git repo](https://aider.chat/docs/ctags.html)
-and share it with GPT to help it better understand and modify large codebases.
+Aider supports [coding with your voice](https://aider.chat/docs/voice.html)
+using the in-chat `/voice` command.
+Aider uses the [PortAudio](http://www.portaudio.com) library to
+capture audio.
+Installing PortAudio is completely optional, but can usually be accomplished like this:
 
-Aider only attempts to use ctags with GPT-4,
-and currently doesn't use ctags at all with GPT-3.5.
-So if your OpenAI API key doesn't support GPT-4, then you don't need ctags.
-
-You should consult the
-[universal ctags repo](https://github.com/universal-ctags/ctags)
-for official instructions on how to install it in your environment.
-But you may be able to install a compatible version using these commands:
-
-* Mac: `brew install universal-ctags`
-* Windows: `choco install universal-ctags`
-* Ubuntu: `sudo apt-get install universal-ctags`
-
-Some things to be aware of:
-
-* The `ctags` command needs to be on your shell path so that it will run by default when aider invokes `ctags ...`.
-* You need a build which includes the json feature. You can check by running `ctags --version` and looking for `+json` in the `Optional compiled features` list.
-
+- For Windows, there is no need to install PortAudio.
+- For Mac, do `brew install portaudio`
+- For Linux, do `sudo apt-get install libportaudio2`
 
 ## Add aider to your editor (optional)
 
-[joshuavial](https://github.com/joshuavial) has provided a NeoVim plugin for aider:
+[joshuavial](https://github.com/joshuavial) has been working on editor integrations.
 
-* [https://github.com/joshuavial/aider.nvim](https://github.com/joshuavial/aider.nvim)
+### NeoVim
+
+He provided a NeoVim plugin for aider:
+
+[https://github.com/joshuavial/aider.nvim](https://github.com/joshuavial/aider.nvim)
+
+### VS Code
+
+He also confirmed that aider works inside a VS Code terminal window, but
+found that you should
+[run with `--no-pretty` to avoid flickering issues](https://github.com/paul-gauthier/aider/issues/68#issuecomment-1634985231).
+
+### Other editors
 
 If you are interested in creating an aider plugin for your favorite editor,
 please let me know by opening a
